@@ -1,0 +1,243 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── App / license domain ─────────────────────────────
+// Backs dentist370's existing `Cloud` client (app/app.js:7106-7193).
+
+model Clinic {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  passwordHash String? // null for Google-only accounts (no password set)
+  googleId     String?  @unique
+  createdAt    DateTime @default(now())
+
+  refreshTokens     RefreshToken[]
+  license           License?
+  syncBlob          SyncBlob?
+  pushSubscriptions PushSubscription[]
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid())
+  clinicId   String
+  clinic     Clinic    @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  tokenHash  String    @unique
+  deviceId   String
+  deviceName String?
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+
+  @@index([clinicId])
+}
+
+enum LicenseTier {
+  solo
+  duo
+  clinic
+}
+
+enum LicenseStatus {
+  active
+  expired
+  revoked
+}
+
+model License {
+  id           String        @id @default(uuid())
+  clinicId     String        @unique
+  clinic       Clinic        @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  key          String        @unique
+  tier         LicenseTier
+  status       LicenseStatus @default(active)
+  activatedAt  DateTime      @default(now())
+  expiresAt    DateTime?
+
+  // Identity used in the dentistsbook platform token (architecture doc section 6).
+  // Defaults to the clinic id but kept separate so it can diverge later (e.g. per-doctor).
+  doctorId     String?
+}
+
+model SyncBlob {
+  id              String   @id @default(uuid())
+  clinicId        String   @unique
+  clinic          Clinic   @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  version         Int      @default(0)
+  ciphertext      String
+  iv              String
+  salt            String
+  alg             String
+  kdf             Json
+  clientUpdatedAt DateTime?
+  updatedAt       DateTime @updatedAt
+}
+
+model PushSubscription {
+  id        String   @id @default(uuid())
+  clinicId  String
+  clinic    Clinic   @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  staffId   String
+  endpoint  String
+  keys      Json
+  createdAt DateTime @default(now())
+
+  @@index([clinicId, staffId])
+}
+
+// ───────────────────────────── Platform domain (dentistsbook) ─────────────────────────────
+// Mirrors architecture doc section 7. Only Doctor/Area/Case have live routes in this pass;
+// the rest are scaffolded for the later education/payments/messaging phases.
+
+enum Availability {
+  full
+  part
+  none
+}
+
+model Doctor {
+  id           String       @id @default(uuid())
+  doctorId     String       @unique // from the platform token (architecture doc section 6)
+  name         String
+  bio          String?
+  cvUrl        String?
+  verified     Boolean      @default(false)
+  availability Availability @default(none)
+  contactMode  String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  areas    Area[]
+  cases    Case[]
+  channels Channel[]
+
+  @@index([availability])
+}
+
+model Area {
+  id               String  @id @default(uuid())
+  doctorId         String
+  doctor           Doctor  @relation(fields: [doctorId], references: [doctorId], onDelete: Cascade)
+  region           String
+  city             String
+  willingToRelocate Boolean @default(false)
+
+  @@index([doctorId])
+  @@index([region])
+}
+
+model Case {
+  id              String   @id @default(uuid())
+  doctorId        String
+  doctor          Doctor   @relation(fields: [doctorId], references: [doctorId], onDelete: Cascade)
+  beforeImg       String
+  afterImg        String
+  title           String
+  patientConsent  Boolean  @default(false)
+  isPublic        Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  @@index([doctorId])
+}
+
+model Channel {
+  id          String   @id @default(uuid())
+  doctorId    String
+  doctor      Doctor   @relation(fields: [doctorId], references: [doctorId], onDelete: Cascade)
+  title       String
+  description String?
+  cover       String?
+  createdAt   DateTime @default(now())
+
+  videos Video[]
+}
+
+model Video {
+  id        String   @id @default(uuid())
+  channelId String
+  channel   Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  title     String
+  isPaid    Boolean  @default(false)
+  price     Decimal? @db.Decimal(10, 2)
+  streamId  String?
+  duration  Int?
+  createdAt DateTime @default(now())
+
+  purchases Purchase[]
+}
+
+model Buyer {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String?
+  country   String?
+  createdAt DateTime @default(now())
+
+  purchases Purchase[]
+}
+
+enum PurchaseStatus {
+  pending
+  paid
+  refunded
+  failed
+}
+
+model Purchase {
+  id           String         @id @default(uuid())
+  buyerId      String
+  buyer        Buyer          @relation(fields: [buyerId], references: [id])
+  videoId      String
+  video        Video          @relation(fields: [videoId], references: [id])
+  amount       Decimal        @db.Decimal(10, 2)
+  platformFee  Decimal        @db.Decimal(10, 2) // 20% per architecture doc section 8
+  provider     String // "stripe" | "zaincash"
+  status       PurchaseStatus @default(pending)
+  createdAt    DateTime       @default(now())
+
+  transaction Transaction?
+}
+
+model ClinicOwner {
+  id        String   @id @default(uuid())
+  name      String
+  region    String
+  contact   String
+  createdAt DateTime @default(now())
+
+  inquiries Inquiry[]
+}
+
+enum InquiryStatus {
+  open
+  replied
+  closed
+}
+
+model Inquiry {
+  id            String        @id @default(uuid())
+  fromId        String
+  clinicOwner   ClinicOwner   @relation(fields: [fromId], references: [id], onDelete: Cascade)
+  toDoctorId    String
+  message       String
+  status        InquiryStatus @default(open)
+  createdAt     DateTime      @default(now())
+}
+
+model Transaction {
+  id         String   @id @default(uuid())
+  purchaseId String   @unique
+  purchase   Purchase @relation(fields: [purchaseId], references: [id])
+  ref        String   @unique
+  gross      Decimal  @db.Decimal(10, 2)
+  fee        Decimal  @db.Decimal(10, 2)
+  netToDoctor Decimal @db.Decimal(10, 2)
+  provider   String
+  createdAt  DateTime @default(now())
+}
